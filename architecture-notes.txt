@@ -1,0 +1,71 @@
+Content Broadcasting System Architecture Notes
+
+1. Authentication and RBAC Flow
+The system uses JWT-based authentication. Users authenticate through the login endpoint and receive a signed token containing their user id, email, and role. Protected routes require the Authorization header in Bearer format. The authentication middleware verifies the token, loads the current user from the database, and attaches that user to the request object.
+
+Role-based access control is enforced after authentication. Teacher-only routes use a role gate that permits only users with the teacher role. Principal-only routes use a role gate that permits only users with the principal role. This keeps authorization rules explicit at the routing layer and avoids duplicating role checks in controller logic.
+
+2. Layered Structure
+The application uses a layered structure with a services folder, keeping the controllers focused purely on HTTP request/response handling. All core business logic lives in the service modules.
+
+3. Upload Approach with Multer
+The upload pipeline uses multer with disk storage. Files are written to a local uploads directory using generated filenames that combine the current timestamp with a sanitized version of the original file name. The file filter only accepts image extensions allowed by the requirement: jpg, png, and gif. The size limit is set to 10 MB.
+
+The upload endpoint requires a file, title, and subject. The service creates the content row, then finds or creates the matching subject slot row, and finally inserts the schedule row that stores rotation order, duration, and optional start and end times. The initial workflow state is pending so that principals can review the content before it becomes visible to the public broadcasting API.
+
+4. Database Design
+There are four main tables: users, content, content_slots, and content_schedule.
+
+The users table stores identity and access control fields:
+- id
+- name
+- email
+- password_hash
+- role
+- created_at
+
+The content table stores uploaded asset metadata and approval state:
+- id
+- title
+- description
+- subject
+- file_path
+- file_type
+- file_size
+- uploaded_by
+- status
+- rejection_reason
+- approved_by
+- approved_at
+- created_at
+
+The content_slots table stores the logical broadcast slot for each subject:
+- id
+- subject
+- created_at
+
+The content_schedule table stores rotation and scheduling configuration:
+- id
+- content_id
+- slot_id
+- rotation_order
+- duration
+- start_time
+- end_time
+- created_at
+
+The uploaded_by field links content to the teacher who submitted it. The approved_by field links moderation decisions to the principal who approved or rejected the item. The slot table separates subject grouping from the content asset itself, and the schedule table separates ordering, duration, and activation windows from the content metadata.
+
+5. Approval Workflow
+Teachers submit content into the pending state. Principals fetch all pending content through a review endpoint. A principal can approve an item, which changes the status to approved and stores approved_by and approved_at. A principal can also reject an item, which changes the status to rejected and stores the rejection reason plus approval metadata.
+
+6. Public Broadcasting API and Rotation Logic
+The live broadcasting endpoint is public and returns content for one teacher at a time. It queries the content_schedule table and joins it with content and content_slots. The content join filters records to the requested teacher and approved status. The schedule query filters records by the active time window using start_time and end_time so only currently valid rows remain in rotation.
+
+After filtering, schedules are grouped by slot so each subject feed is processed independently. Within each slot, rows are sorted by rotation_order. The system builds a full cycle length from the duration values stored in content_schedule, converts those durations to milliseconds, and then computes the current cycle offset with modulo arithmetic:
+
+currentEpochMs % totalCycleDurationMs
+
+The cycle offset is compared against cumulative schedule durations in order. The first schedule window that contains the offset becomes the active item for that slot. This means rotation_order controls sequence while duration controls how long each content item remains active.
+
+I chose this mathematical approach because it eliminates the need for background cron jobs or queue workers. The active item is calculated dynamically on every request based on the current time and the scheduled durations. This keeps the broadcast state deterministic and ensures it automatically advances to the next item without requiring continuous database writes.
